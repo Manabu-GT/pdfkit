@@ -59,6 +59,7 @@ class PDFDocument
     mixin 'text'
     mixin 'images'
     mixin 'annotations'
+    mixin 'table'
         
     addPage: (options = @options) ->
         # create a page object
