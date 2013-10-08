@@ -71,13 +71,21 @@ class PDFFont
         @cmap = @ttf.cmap.unicode
         throw new Error 'No unicode cmap for font' if not @cmap
 
+        #REVIEW: detect if it is a CJK font
+        @isCIDFont = @cmap.length >= 28359
+
         @hmtx = @ttf.hmtx
-        @charWidths = (Math.round @hmtx.widths[gid] * @scaleFactor for i, gid of @cmap.codeMap when i >= 32)
-        
+        @charWidths = {}
+        if @isCIDFont
+            for i, gid of @cmap.codeMap
+                @charWidths[i] = Math.round @hmtx.widths[gid] * @scaleFactor
+        else
+            @charWidths = (Math.round @hmtx.widths[gid] * @scaleFactor for i, gid of @cmap.codeMap when i >= 32)
+
         # Create a placeholder reference to be filled in embedTTF.
         @ref = @document.ref
             Type: 'Font'
-            Subtype: 'TrueType'
+            Subtype: if @isCIDFont then 'CIDFontType2' else 'TrueType'
             
     embedTTF: (fn) ->
         data = @subset.encode()
@@ -90,10 +98,12 @@ class PDFFont
                 Filter: 'FlateDecode'
             
             @fontfile.add compressedData
-                
+
+            # Font names in PDF must not contain space character
+            fontName = @subset.postscriptName.replace(/\ /g, '_')
             @descriptor = @document.ref
                 Type: 'FontDescriptor'
-                FontName: @subset.postscriptName
+                FontName: fontName
                 FontFile2: @fontfile
                 FontBBox: @bbox
                 Flags: @flags
@@ -107,28 +117,50 @@ class PDFFont
             firstChar = +Object.keys(@subset.cmap)[0]
             charWidths = for code, glyph of @subset.cmap
                 Math.round @ttf.hmtx.forGlyph(glyph).advance * @scaleFactor
-            
-        
+
             cmap = @document.ref()
-            cmap.add toUnicodeCmap(@subset.subset)
-            
-            ref = 
-                Type: 'Font'
-                BaseFont: @subset.postscriptName
-                Subtype: 'TrueType'
-                FontDescriptor: @descriptor
-                FirstChar: firstChar
-                LastChar: firstChar + charWidths.length - 1
-                Widths: @document.ref charWidths
-                Encoding: 'MacRomanEncoding'
-                ToUnicode: cmap
-            
+            cmap.add toUnicodeCmap(@isCIDFont, if @isCIDFont then @subset.cmap else @subset.subset)
+
+            ref = {}
+            if @isCIDFont
+                cIDSystemInfo =
+                    'Ordering': {isString: true, toString: -> 'Identity'}
+                    'Registry': {isString: true, toString: -> 'Adobe'}
+                    'Supplement': 0
+
+                 descendantFont = @document.ref
+                    BaseFont: fontName
+                    CIDSystemInfo: cIDSystemInfo
+                    Type: 'Font'
+                    Subtype: 'CIDFontType2'
+                    FontDescriptor: @descriptor
+                    DW: 1000
+                    CIDToGIDMap: 'Identity'
+
+                 ref =
+                    DescendantFonts: [descendantFont]
+                    Type: 'Font'
+                    BaseFont: fontName
+                    Subtype: 'Type0'
+                    Encoding: 'Identity-H'
+            else
+                ref =
+                    Type: 'Font'
+                    BaseFont: fontName
+                    Subtype: 'TrueType'
+                    FontDescriptor: @descriptor
+                    FirstChar: firstChar
+                    LastChar: firstChar + charWidths.length - 1
+                    Widths: @document.ref charWidths
+                    Encoding: 'MacRomanEncoding'
+                    ToUnicode: cmap
+
             for key, val of ref
                 @ref.data[key] = val
                 
             cmap.finalize(@document.compress, fn) # compress it
             
-    toUnicodeCmap = (map) ->
+    toUnicodeCmap = (isCIDFont, map) ->
         unicodeMap = '''
             /CIDInit /ProcSet findresource begin
             12 dict begin
@@ -144,7 +176,22 @@ class PDFFont
             <00><ff>
             endcodespacerange
         '''
-    
+        if isCIDFont
+            unicodeMap = '''
+                         /CIDInit /ProcSet findresource begin
+                         12 dict begin
+                         begincmap
+                         /CIDSystemInfo <<
+                           /Registry (TTX)
+                           /Ordering (TTX)
+                           /Supplement 0
+                         >> def
+                         /CMapName /TTX def
+                         /CMapType 2 def
+                         1 begincodespacerange
+                         <0000><ffff>
+                         endcodespacerange
+                      '''
         codes = Object.keys(map).sort (a, b) -> a - b
         range = []
         for code in codes
@@ -153,8 +200,14 @@ class PDFFont
                 range = []
                 
             unicode = ('0000' + map[code].toString(16)).slice(-4)
-            code = (+code).toString(16)
-            range.push "<#{code}><#{unicode}>"
+            if isCIDFont
+                code = +code;
+                cidcode = ('00' + (code >> 16).toString(16)).slice(-2)
+                cidcode += ('00' + (code & 255).toString(16)).slice(-2)
+                range.push "<#{cidcode}><#{unicode}>"
+            else
+                code = (+code).toString(16)
+                range.push "<#{code}><#{unicode}>"
             
         unicodeMap += "\n#{range.length} beginbfchar\n#{range.join('\n')}\nendbfchar\n" if range.length
         unicodeMap += '''
@@ -195,8 +248,12 @@ class PDFFont
         string = '' + string
         width = 0
         for i in [0...string.length]
-            charCode = string.charCodeAt(i) - if @isAFM then 0 else 32
-            width += @charWidths[charCode] or 0
+            if @isCIDFont
+                charCode = string.charCodeAt(i)
+                width += @charWidths[charCode] or 0
+            else
+                charCode = string.charCodeAt(i) - if @isAFM then 0 else 32
+                width += @charWidths[charCode] or 0
         
         scale = size / 1000    
         return width * scale
