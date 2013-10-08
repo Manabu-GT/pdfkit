@@ -5,14 +5,15 @@ class Subset
     constructor: (@font) ->
         @subset = {}
         @unicodes = {}
-        @next = 33 # PDFs don't like character codes between 0 and 32
+        # CJK fonts support
+        @isCIDFont = @font.cmap.unicode.length >= 28359
+        @next = if @isCIDFont then 1 else 33  # PDFs don't like character codes between 0 and 32 with simple font
         
     use: (character) ->
         # if given a string, add each character
         if typeof character is 'string'
             for i in [0...character.length]
                 @use character.charCodeAt(i)
-                
             return
 
         if not @unicodes[character]
@@ -25,8 +26,11 @@ class Subset
         string = ''
         for i in [0...text.length]
             char = @unicodes[text.charCodeAt(i)]
-            string += String.fromCharCode(char)
-            
+            if @isCIDFont
+                string += String.fromCharCode(char >> 16)
+                string += String.fromCharCode(char & 255)
+            else
+                string += String.fromCharCode(char)
         return string
         
     cmap: ->
@@ -35,7 +39,6 @@ class Subset
         mapping = {}
         for roman, unicode of @subset
             mapping[roman] = unicodeCmap[unicode]
-        
         return mapping
         
     glyphIDs: ->
